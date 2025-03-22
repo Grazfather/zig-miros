@@ -1,0 +1,20 @@
+.{
+    .name = .zig_miros,
+    .version = "0.0.0",
+    .fingerprint = 0xa479ce990ba9aa33, // Changing this has security and trust implications.
+
+    .minimum_zig_version = "0.14.0",
+
+    .dependencies = .{
+        .microzig = .{
+            .url = "https://github.com/ZigEmbeddedGroup/microzig/archive/cdc15df90035c2b8cc5b60bb8e67ce1a3371de16.tar.gz",
+            .hash = "microzig-0.13.2-D20YSY32ZwN11p3W_qxwdjafP0y2_Z3TUrM4ZACgEN8N",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}
