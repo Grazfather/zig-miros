@@ -106,11 +106,10 @@ pub fn OS_run() void {
 
 // Must be called from an interrupt handler, where interrupts are disabled
 fn OS_sched() void {
-    // TODO: Schedule threads
-    if (OS_curr == &thread1)
-        OS_next = &thread2
-    else
-        OS_next = &thread1;
+    OS_currIdx += 1;
+    if (OS_currIdx == OS_threadNum)
+        OS_currIdx = 0;
+    OS_next = OS_threads[OS_currIdx];
 
     // If we have a new thread to schedule, make PendSV execute
     if (OS_next != OS_curr) {
@@ -121,6 +120,7 @@ fn OS_sched() void {
 const OSThread = OSThread_size(0x1000);
 var thread1 = OSThread{};
 var thread2 = OSThread{};
+var thread3 = OSThread{};
 
 pub export var OS_curr: *OSThread = undefined;
 pub export var OS_next: *OSThread = undefined;
@@ -226,6 +226,19 @@ fn task2() callconv(.c) noreturn {
     }
 }
 
+fn task3() callconv(.c) noreturn {
+    while (true) {
+        // std.log.info("In task 3", .{});
+        led.toggle();
+        // sleep_ms(1000);
+        // busy loop to not involve other timer stuff
+        var i: u32 = 0;
+        for (0..1000000) |_| {
+            i += 1;
+        }
+    }
+}
+
 pub fn main() noreturn {
     // init uart logging
     uart_tx_pin.set_function(.uart);
@@ -240,9 +253,7 @@ pub fn main() noreturn {
     // Initialize stack for each task
     thread1.start(&task1);
     thread2.start(&task2);
-
-    // Schedule a task for next interrupt
-    OS_next = &thread2;
+    thread3.start(&task3);
 
     std.log.info("task1 at {*}", .{&task1});
     std.log.info("thread1 at {*}", .{&thread1});
