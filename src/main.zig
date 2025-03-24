@@ -83,6 +83,41 @@ fn OSThread_size(comptime size: usize) type {
         }
     };
 }
+
+pub fn OS_init() void {
+    peripherals.PPB.SHPR3.modify(.{
+        // Set priority of PendSV low so it happens last after SysTick
+        .PRI_14 = 3,
+        // Set priority of SysTick to the highest (which should be the default)
+        .PRI_15 = 0,
+    });
+}
+
+pub fn OS_run() void {
+    // Enable the SysTick interrupt manually
+    peripherals.PPB.SYST_CSR.modify(.{ .ENABLE = 1, .TICKINT = 1, .CLKSOURCE = 1 });
+    // RVR = Reload Value Register
+    // 1ms (125MHz / 125KMz)
+    peripherals.PPB.SYST_RVR.modify(.{ .RELOAD = 125_000 - 1 });
+
+    // Kick off the 'first' scheduling of tasks
+    OS_sched();
+}
+
+// Must be called from an interrupt handler, where interrupts are disabled
+fn OS_sched() void {
+    // TODO: Schedule threads
+    if (OS_curr == &thread1)
+        OS_next = &thread2
+    else
+        OS_next = &thread1;
+
+    // If we have a new thread to schedule, make PendSV execute
+    if (OS_next != OS_curr) {
+        peripherals.PPB.ICSR.modify(.{ .PENDSVSET = 1 });
+    }
+}
+
 const OSThread = OSThread_size(0x1000);
 var thread1 = OSThread{};
 var thread2 = OSThread{};
@@ -165,7 +200,7 @@ pub fn systick_handler() callconv(.c) void {
 const sleep_ms = rp2xxx.time.sleep_ms;
 fn task1() callconv(.c) noreturn {
     while (true) {
-        std.log.info("In task 1", .{});
+        // std.log.info("In task 1", .{});
         led1.toggle();
         // TODO: Fix sleep function not working (messing up timers?)
         // sleep_ms(250);
@@ -180,7 +215,7 @@ fn task1() callconv(.c) noreturn {
 
 fn task2() callconv(.c) noreturn {
     while (true) {
-        std.log.info("In task 2", .{});
+        // std.log.info("In task 2", .{});
         led2.toggle();
         // sleep_ms(1000);
         // busy loop to not involve other timer stuff
@@ -191,21 +226,7 @@ fn task2() callconv(.c) noreturn {
     }
 }
 
-// Must be called from an interrupt handler, where interrupts are disabled
-fn OS_sched() void {
-    // TODO: Schedule threads
-    if (OS_curr == &thread1)
-        OS_next = &thread2
-    else
-        OS_next = &thread1;
-
-    // If we have a new thread to schedule, make PendSV execute
-    if (OS_next != OS_curr) {
-        peripherals.PPB.ICSR.modify(.{ .PENDSVSET = 1 });
-    }
-}
-
-pub fn main() !void {
+pub fn main() noreturn {
     // init uart logging
     uart_tx_pin.set_function(.uart);
     uart.apply(.{ .baud_rate = baud_rate, .clock_config = rp2xxx.clock_config });
@@ -232,24 +253,8 @@ pub fn main() !void {
     std.log.info("systick handler at {*}", .{&systick_handler});
     std.log.info("pendsv handler at {*}", .{&pendsv_handler});
 
-    // TODO: Set in some OS init function
-    peripherals.PPB.SHPR3.modify(.{
-        // Set priority of PendSV low so it happens last after SysTick
-        .PRI_14 = 3,
-        // Set priority of SysTick to the highest (which should be the default)
-        .PRI_15 = 0,
-    });
-
-    // NOTE: To manually kick off interrupt in pendsv: PENDSVSET: write bit 28 of ICSR
-    // x/wx 0xe000ed04
-    // set {int}0xe000ed04 = 0x1....
-    // e.g. set to 0x10000000 (plus preserve old bits)
-    // Enable it SysTick interrupt manually
-    peripherals.PPB.SYST_CSR.modify(.{ .ENABLE = 1, .TICKINT = 1, .CLKSOURCE = 1 });
-    // RVR = Reload Value Register
-    // 1ms (125MHz / 125KMz)
-    peripherals.PPB.SYST_RVR.modify(.{ .RELOAD = 125_000 - 1 });
-
+    OS_init();
+    OS_run();
     while (true) {
         asm volatile ("wfi");
     }
