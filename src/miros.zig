@@ -3,7 +3,7 @@ const std = @import("std");
 extern fn OS_onStartup() void;
 extern fn OS_onIdle() void;
 
-pub const OSThread = extern struct {
+pub const Thread = extern struct {
     const Self = @This();
     sp: *volatile u32 = undefined,
     spi: usize = 0,
@@ -65,7 +65,7 @@ pub const OSThread = extern struct {
     }
 };
 
-pub fn OS_init(stack: []u32) void {
+pub fn init(stack: []u32) void {
     // Set PendSV priority to the lowest possible
     const SHPR3: *volatile u32 = @ptrFromInt(0xE000ED20);
     SHPR3.* |= 0xFF << 16;
@@ -74,16 +74,16 @@ pub fn OS_init(stack: []u32) void {
     idle_thread.start(0, idle_task);
 }
 
-pub fn OS_run() noreturn {
+pub fn run() noreturn {
     // Must be provided by client;
     OS_onStartup();
     // Kick off the 'first' scheduling of tasks
-    OS_sched();
+    sched();
     unreachable;
 }
 
 // Must be called from an interrupt handler, where interrupts are disabled
-pub fn OS_sched() void {
+pub fn sched() void {
     // If nothing is ready, schedule the idle thread
     if (OS_readySet == 0) {
         OS_next = OS_threads[0].?;
@@ -99,7 +99,7 @@ pub fn OS_sched() void {
     }
 }
 
-pub fn OS_delay(ticks: u32) void {
+pub fn delay(ticks: u32) void {
     // disable interrupts
     asm volatile ("cpsid i");
     if (OS_curr == OS_threads[0]) @panic("cannot call OS_delay from idle thread");
@@ -112,12 +112,12 @@ pub fn OS_delay(ticks: u32) void {
     // Set delayed bit
     OS_delayedSet |= bit;
     // Call the scheduler
-    OS_sched();
+    sched();
     // enable interrupts
     asm volatile ("cpsie i");
 }
 
-pub fn OS_tick() void {
+pub fn tick() void {
     var s = OS_delayedSet;
     while (s != 0) {
         const idx = get_top_bit_index(s);
@@ -208,13 +208,12 @@ pub fn pendsv_handler() callconv(.c) void {
     );
 }
 
-// TODO: Encapsulate
-var OS_threads: [32 + 1]?*OSThread = undefined;
+var OS_threads: [32 + 1]?*Thread = undefined;
 var OS_readySet: u32 = 0;
 var OS_delayedSet: u32 = 0;
 
-export var OS_curr: *OSThread = undefined;
-export var OS_next: *OSThread = undefined;
+export var OS_curr: *Thread = undefined;
+export var OS_next: *Thread = undefined;
 
 // NOTE: Client code provides the stack
-var idle_thread = OSThread{};
+var idle_thread = Thread{};

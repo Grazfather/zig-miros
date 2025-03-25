@@ -34,23 +34,23 @@ var stack1: [0x800]u32 = @splat(0xdeadbeef);
 var stack2: [0x800]u32 = undefined;
 var stack3: [0x800]u32 = undefined;
 // Allow setting up a startup delay
-var thread1 = miros.OSThread{ .timeout = 500 };
-var thread2 = miros.OSThread{};
-var thread3 = miros.OSThread{};
+var thread1 = miros.Thread{ .timeout = 500 };
+var thread2 = miros.Thread{};
+var thread3 = miros.Thread{};
 
 pub fn systick_handler() callconv(.c) void {
-    miros.OS_tick();
+    miros.tick();
     const cs = microzig.interrupt.enter_critical_section();
     defer cs.leave();
 
-    miros.OS_sched();
+    miros.sched();
 }
 
 fn task1() callconv(.c) noreturn {
     while (true) {
         std.log.info("In task 1", .{});
         led1.toggle();
-        miros.OS_delay(500);
+        miros.delay(500);
     }
 }
 
@@ -58,7 +58,7 @@ fn task2() callconv(.c) noreturn {
     while (true) {
         std.log.info("In task 2", .{});
         led2.toggle();
-        miros.OS_delay(1000);
+        miros.delay(1000);
     }
 }
 
@@ -66,7 +66,7 @@ fn task3() callconv(.c) noreturn {
     while (true) {
         std.log.info("In task 3", .{});
         led.toggle();
-        miros.OS_delay(750);
+        miros.delay(750);
     }
 }
 
@@ -97,7 +97,7 @@ pub fn main() noreturn {
         l.set_direction(.out);
     }
 
-    miros.OS_init(&idle_stack);
+    miros.init(&idle_stack);
 
     // Assign stack to threads
     thread1.init(&stack1);
@@ -109,5 +109,5 @@ pub fn main() noreturn {
     thread2.start(5, &task2);
     thread3.start(13, &task3);
 
-    miros.OS_run();
+    miros.run();
 }
