@@ -33,6 +33,7 @@ const OSThread = extern struct {
     sp: *volatile u32 = undefined,
     spi: usize = 0,
     timeout: u32 = 0,
+    priority: u8 = 0,
     stack: [*]u32 = undefined,
     // TODO: Make sure sp is 8 byte aligned as well?
     // Maybe by making sure the size is a multiple of 8
@@ -60,7 +61,11 @@ const OSThread = extern struct {
         }
     }
 
-    fn start(self: *Self, handler: *const fn () callconv(.c) noreturn) void {
+    fn start(self: *Self, prio: u8, handler: *const fn () callconv(.c) noreturn) void {
+        // Error if there is already a thread at this priority
+        if (OS_threads[prio] != null)
+            @panic("thread with this priority already exists");
+
         // Push xPSR
         self.push(1 << 24);
         // Push handler
@@ -70,16 +75,18 @@ const OSThread = extern struct {
             self.push(i);
         }
 
+        self.priority = prio;
+
         // Add to thread list
-        // -- Error if there are too many threads
-        if (OS_threadNum >= 32)
-            @panic("oops");
-        OS_threads[OS_threadNum] = self;
-        // Set as ready, unless first (idle thread) which is always ready, or
-        // the thread is initialized with a timeout
-        if (OS_threadNum != 0 and self.timeout == 0)
-            OS_readySet |= (@as(u32, 1) << (OS_threadNum - 1));
-        OS_threadNum += 1;
+        OS_threads[prio] = self;
+        // Unless the idle thread, add to ready set or delay set as appropriate
+        if (prio != 0) {
+            const bit = (@as(u32, 1) << @truncate(prio - 1));
+            if (self.timeout == 0)
+                OS_readySet |= bit
+            else
+                OS_delayedSet |= bit;
+        }
     }
 };
 
@@ -97,7 +104,7 @@ pub fn OS_init(stack: []u32) void {
     });
 
     idle_thread.init(stack);
-    idle_thread.start(idle_task);
+    idle_thread.start(0, idle_task);
 }
 
 pub fn OS_run() noreturn {
@@ -116,19 +123,11 @@ pub fn OS_run() noreturn {
 fn OS_sched() void {
     // If nothing is ready, schedule the idle thread
     if (OS_readySet == 0) {
-        OS_currIdx = 0;
+        OS_next = OS_threads[0].?;
     } else {
-        loop: while (true) {
-            OS_currIdx += 1;
-            if (OS_currIdx == OS_threadNum)
-                // We loop back to 1, skipping the idle thread
-                OS_currIdx = 1;
-            if (OS_readySet & (@as(u32, 1) << (OS_currIdx - 1)) != 0)
-                break :loop;
-        }
+        const idx = get_top_bit_index(OS_readySet);
+        OS_next = OS_threads[idx].?;
     }
-
-    OS_next = OS_threads[OS_currIdx];
 
     // If we have a new thread to schedule, make PendSV execute
     if (OS_next != OS_curr) {
@@ -141,32 +140,49 @@ fn OS_delay(ticks: u32) void {
     const cs = microzig.interrupt.enter_critical_section();
     defer cs.leave();
     if (OS_curr == OS_threads[0]) @panic("cannot call OS_delay from idle thread");
+
+    const bit = (@as(u32, 1) << @truncate(OS_curr.priority - 1));
     // Set current thread as blocked
     OS_curr.timeout = ticks;
     // Clear ready bit
-    OS_readySet &= ~(@as(u32, 1) << (OS_currIdx - 1));
+    OS_readySet &= ~bit;
+    // Set delayed bit
+    OS_delayedSet |= bit;
     // Call the scheduler
     OS_sched();
-    // enable interrupts
 }
 
 fn OS_tick() void {
-    for (1.., OS_threads[1..]) |i, t| {
+    var s = OS_delayedSet;
+    while (s != 0) {
+        const idx = get_top_bit_index(s);
+        const t = OS_threads[idx].?;
+        const bit = (@as(u32, 1) << @truncate(t.priority - 1));
+        if (t.timeout == 0)
+            @panic("invalid thread in delayedSet");
+
         // Lower timeout
-        if (t.timeout != 0) {
-            t.timeout -= 1;
-            // If timeout done, set ready
-            if (t.timeout == 0)
-                OS_readySet |= (@as(u32, 1) << @truncate(i - 1));
+        t.timeout -= 1;
+
+        // If the timeout is done, set ready & clear delayed
+        if (t.timeout == 0) {
+            OS_readySet |= bit;
+            OS_delayedSet &= ~bit;
         }
+        s &= ~bit;
     }
+}
+
+fn get_top_bit_index(v: u32) usize {
+    // NOTE: There is no clz instruction on Thumb before Thumb2
+    return 32 - @clz(v);
 }
 
 var stack1: [0x800]u32 = @splat(0xdeadbeef);
 var stack2: [0x800]u32 = undefined;
 var stack3: [0x800]u32 = undefined;
 // Allow setting up a startup delay
-var thread1 = OSThread{ .timeout = 5000 };
+var thread1 = OSThread{ .timeout = 500 };
 var thread2 = OSThread{};
 var thread3 = OSThread{};
 
@@ -174,10 +190,9 @@ export var OS_curr: *OSThread = undefined;
 export var OS_next: *OSThread = undefined;
 
 // TODO: Encapsulate
-var OS_threads: [32 + 1]*OSThread = undefined;
+var OS_threads: [32 + 1]?*OSThread = undefined;
 var OS_readySet: u32 = 0;
-var OS_threadNum: u5 = 0;
-var OS_currIdx: u5 = 0;
+var OS_delayedSet: u32 = 0;
 
 // We'd like to use .naked here, but we don't allow that in the vector table
 pub fn pendsv_handler() callconv(.c) void {
@@ -298,9 +313,9 @@ pub fn main() noreturn {
     thread3.init(&stack3);
 
     // Initialize stack and add to thread pool
-    thread1.start(&task1);
-    thread2.start(&task2);
-    thread3.start(&task3);
+    thread1.start(1, &task1);
+    thread2.start(5, &task2);
+    thread3.start(13, &task3);
 
     OS_run();
 }
