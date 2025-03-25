@@ -1,0 +1,19 @@
+.{
+    .name = .rp2040_example,
+    .fingerprint = 0x8099d637703dc9a0,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.14.0",
+
+    .dependencies = .{
+        .microzig = .{
+            .url = "https://github.com/ZigEmbeddedGroup/microzig/archive/cdc15df90035c2b8cc5b60bb8e67ce1a3371de16.tar.gz",
+            .hash = "microzig-0.13.2-D20YSY32ZwN11p3W_qxwdjafP0y2_Z3TUrM4ZACgEN8N",
+        },
+        .miros = .{ .path = "../../" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

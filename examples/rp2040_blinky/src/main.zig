@@ -12,7 +12,7 @@ const uart_tx_pin = rp2xxx.gpio.num(0);
 
 const peripherals = microzig.chip.peripherals;
 
-const miros = @import("./miros.zig");
+const miros = @import("miros");
 
 pub const microzig_options: microzig.Options = .{
     .log_level = .debug,
