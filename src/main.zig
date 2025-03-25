@@ -28,72 +28,79 @@ pub const microzig_options: microzig.Options = .{
     },
 };
 
-fn OSThread_size(comptime size: usize) type {
-    return extern struct {
-        const Self = @This();
-        sp: *volatile u32 = undefined,
-        spi: usize = size,
-        // TODO: Store out of band?
-        stack: [size]u32 align(8) = @splat(0xdeadbeef),
-        // TODO: Make sure sp is 8 byte aligned as well?
-        // Maybe by making sure the size is a multiple of 8
+const OSThread = extern struct {
+    const Self = @This();
+    sp: *volatile u32 = undefined,
+    spi: usize = 0,
+    timeout: u32 = 0,
+    stack: [*]u32 = undefined,
+    // TODO: Make sure sp is 8 byte aligned as well?
+    // Maybe by making sure the size is a multiple of 8
 
-        fn push(self: *Self, v: anytype) void {
-            // Check for overflow
-            if (self.spi == 0)
-                @panic("Stack overflow");
-            self.spi -= 1;
-            self.sp = &self.stack[self.spi];
-            switch (@typeInfo(@TypeOf(v))) {
-                .comptime_int => self.stack[self.spi] = @as(u32, v),
-                .int => self.stack[self.spi] = @bitCast(v),
-                .pointer => self.stack[self.spi] = @intFromPtr(v),
-                else => {
-                    std.log.warn("Type is {any}", .{@TypeOf(v)});
-                    unreachable;
-                },
-            }
+    fn init(self: *Self, stack: []u32) void {
+        self.spi = stack.len;
+        self.sp = &self.stack[self.spi];
+        self.stack = stack.ptr;
+    }
+
+    fn push(self: *Self, v: anytype) void {
+        // Check for overflow
+        if (self.spi == 0)
+            @panic("Stack overflow");
+        self.spi -= 1;
+        self.sp = &self.stack[self.spi];
+        switch (@typeInfo(@TypeOf(v))) {
+            .comptime_int => self.stack[self.spi] = @as(u32, v),
+            .int => self.stack[self.spi] = @bitCast(v),
+            .pointer => self.stack[self.spi] = @intFromPtr(v),
+            else => {
+                std.log.warn("Type is {any}", .{@TypeOf(v)});
+                unreachable;
+            },
+        }
+    }
+
+    fn start(self: *Self, handler: *const fn () callconv(.c) noreturn) void {
+        // Push xPSR
+        self.push(1 << 24);
+        // Push handler
+        self.push(handler);
+        // Push fake LR, R12, R3, R2, R1, R0, R11, R10, R9, R8, R7, R6, R5, R4
+        for ([_]u32{ 13, 12, 3, 2, 1, 0, 11, 10, 9, 8, 7, 6, 5, 4 }) |i| {
+            self.push(i);
         }
 
-        fn pop(self: *Self) !usize {
-            const v = self.stack[self.spi];
-            // Check for underflow
-            if (self.spi == size - 1)
-                @panic("Stack underflow");
-            self.spi += 1;
-            return v;
-        }
+        // Add to thread list
+        // -- Error if there are too many threads
+        if (OS_threadNum >= 32)
+            @panic("oops");
+        OS_threads[OS_threadNum] = self;
+        // Set as ready, unless first (idle thread) which is always ready, or
+        // the thread is initialized with a timeout
+        if (OS_threadNum != 0 and self.timeout == 0)
+            OS_readySet |= (@as(u32, 1) << (OS_threadNum - 1));
+        OS_threadNum += 1;
+    }
+};
 
-        fn start(self: *Self, handler: *const fn () callconv(.c) noreturn) void {
-            // Push xPSR
-            self.push(1 << 24);
-            // Push handler
-            self.push(handler);
-            // Push fake LR, R12, R3, R2, R1, R0, R11, R10, R9, R8, R7, R6, R5, R4
-            for ([_]u32{ 13, 12, 3, 2, 1, 0, 11, 10, 9, 8, 7, 6, 5, 4 }) |i| {
-                self.push(i);
-            }
-
-            // Add to thread list
-            // -- Error if there are too many threads
-            if (OS_threadNum >= 32)
-                @panic("oops");
-            OS_threads[OS_threadNum] = self;
-            OS_threadNum += 1;
-        }
-    };
+pub fn OS_onIdle() void {
+    asm volatile ("wfi");
 }
 
-pub fn OS_init() void {
+pub fn OS_init(stack: []u32) void {
     peripherals.PPB.SHPR3.modify(.{
         // Set priority of PendSV low so it happens last after SysTick
         .PRI_14 = 3,
+        // TODO: Should this be set in client code?
         // Set priority of SysTick to the highest (which should be the default)
         .PRI_15 = 0,
     });
+
+    idle_thread.init(stack);
+    idle_thread.start(idle_task);
 }
 
-pub fn OS_run() void {
+pub fn OS_run() noreturn {
     // Enable the SysTick interrupt manually
     peripherals.PPB.SYST_CSR.modify(.{ .ENABLE = 1, .TICKINT = 1, .CLKSOURCE = 1 });
     // RVR = Reload Value Register
@@ -102,13 +109,25 @@ pub fn OS_run() void {
 
     // Kick off the 'first' scheduling of tasks
     OS_sched();
+    unreachable;
 }
 
 // Must be called from an interrupt handler, where interrupts are disabled
 fn OS_sched() void {
-    OS_currIdx += 1;
-    if (OS_currIdx == OS_threadNum)
+    // If nothing is ready, schedule the idle thread
+    if (OS_readySet == 0) {
         OS_currIdx = 0;
+    } else {
+        loop: while (true) {
+            OS_currIdx += 1;
+            if (OS_currIdx == OS_threadNum)
+                // We loop back to 1, skipping the idle thread
+                OS_currIdx = 1;
+            if (OS_readySet & (@as(u32, 1) << (OS_currIdx - 1)) != 0)
+                break :loop;
+        }
+    }
+
     OS_next = OS_threads[OS_currIdx];
 
     // If we have a new thread to schedule, make PendSV execute
@@ -117,18 +136,48 @@ fn OS_sched() void {
     }
 }
 
-const OSThread = OSThread_size(0x1000);
-var thread1 = OSThread{};
+fn OS_delay(ticks: u32) void {
+    // disable interrupts
+    const cs = microzig.interrupt.enter_critical_section();
+    defer cs.leave();
+    if (OS_curr == OS_threads[0]) @panic("cannot call OS_delay from idle thread");
+    // Set current thread as blocked
+    OS_curr.timeout = ticks;
+    // Clear ready bit
+    OS_readySet &= ~(@as(u32, 1) << (OS_currIdx - 1));
+    // Call the scheduler
+    OS_sched();
+    // enable interrupts
+}
+
+fn OS_tick() void {
+    for (1.., OS_threads[1..]) |i, t| {
+        // Lower timeout
+        if (t.timeout != 0) {
+            t.timeout -= 1;
+            // If timeout done, set ready
+            if (t.timeout == 0)
+                OS_readySet |= (@as(u32, 1) << @truncate(i - 1));
+        }
+    }
+}
+
+var stack1: [0x800]u32 = @splat(0xdeadbeef);
+var stack2: [0x800]u32 = undefined;
+var stack3: [0x800]u32 = undefined;
+// Allow setting up a startup delay
+var thread1 = OSThread{ .timeout = 5000 };
 var thread2 = OSThread{};
 var thread3 = OSThread{};
 
-pub export var OS_curr: *OSThread = undefined;
-pub export var OS_next: *OSThread = undefined;
+export var OS_curr: *OSThread = undefined;
+export var OS_next: *OSThread = undefined;
 
 // TODO: Encapsulate
 var OS_threads: [32 + 1]*OSThread = undefined;
-var OS_threadNum: usize = 0;
-var OS_currIdx: usize = 0;
+var OS_readySet: u32 = 0;
+var OS_threadNum: u5 = 0;
+var OS_currIdx: u5 = 0;
 
 // We'd like to use .naked here, but we don't allow that in the vector table
 pub fn pendsv_handler() callconv(.c) void {
@@ -190,26 +239,18 @@ pub fn pendsv_handler() callconv(.c) void {
 }
 
 pub fn systick_handler() callconv(.c) void {
-    // TODO: tick ctr increment
+    OS_tick();
     const cs = microzig.interrupt.enter_critical_section();
     defer cs.leave();
 
     OS_sched();
 }
 
-const sleep_ms = rp2xxx.time.sleep_ms;
 fn task1() callconv(.c) noreturn {
     while (true) {
-        // std.log.info("In task 1", .{});
+        std.log.info("In task 1", .{});
         led1.toggle();
-        // TODO: Fix sleep function not working (messing up timers?)
-        // sleep_ms(250);
-
-        // busy loop to not involve other timer stuff
-        var i: u32 = 0;
-        for (0..500000) |_| {
-            i += 1;
-        }
+        OS_delay(500);
     }
 }
 
@@ -217,12 +258,7 @@ fn task2() callconv(.c) noreturn {
     while (true) {
         // std.log.info("In task 2", .{});
         led2.toggle();
-        // sleep_ms(1000);
-        // busy loop to not involve other timer stuff
-        var i: u32 = 0;
-        for (0..1000000) |_| {
-            i += 1;
-        }
+        OS_delay(1000);
     }
 }
 
@@ -230,14 +266,18 @@ fn task3() callconv(.c) noreturn {
     while (true) {
         // std.log.info("In task 3", .{});
         led.toggle();
-        // sleep_ms(1000);
-        // busy loop to not involve other timer stuff
-        var i: u32 = 0;
-        for (0..1000000) |_| {
-            i += 1;
-        }
+        OS_delay(750);
     }
 }
+
+fn idle_task() callconv(.c) noreturn {
+    while (true) {
+        OS_onIdle();
+    }
+}
+
+var idle_stack: [0x100]u32 = undefined;
+var idle_thread = OSThread{};
 
 pub fn main() noreturn {
     // init uart logging
@@ -250,23 +290,17 @@ pub fn main() noreturn {
         l.set_direction(.out);
     }
 
-    // Initialize stack for each task
+    OS_init(&idle_stack);
+
+    // Assign stack to threads
+    thread1.init(&stack1);
+    thread2.init(&stack2);
+    thread3.init(&stack3);
+
+    // Initialize stack and add to thread pool
     thread1.start(&task1);
     thread2.start(&task2);
     thread3.start(&task3);
 
-    std.log.info("task1 at {*}", .{&task1});
-    std.log.info("thread1 at {*}", .{&thread1});
-
-    std.log.info("task2 at {*}", .{&task2});
-    std.log.info("thread2 at {*}", .{&thread2});
-
-    std.log.info("systick handler at {*}", .{&systick_handler});
-    std.log.info("pendsv handler at {*}", .{&pendsv_handler});
-
-    OS_init();
     OS_run();
-    while (true) {
-        asm volatile ("wfi");
-    }
 }
