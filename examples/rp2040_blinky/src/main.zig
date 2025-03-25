@@ -30,9 +30,9 @@ pub const microzig_options: microzig.Options = .{
     },
 };
 
-var stack1: [0x800]u32 = @splat(0xdeadbeef);
-var stack2: [0x800]u32 = undefined;
-var stack3: [0x800]u32 = undefined;
+var stack1: [0x800]u32 align(8) = @splat(0xdeadbeef);
+var stack2: [0x800]u32 align(8) = undefined;
+var stack3: [0x800]u32 align(8) = undefined;
 // Allow setting up a startup delay
 var thread1 = miros.Thread{ .timeout = 500 };
 var thread2 = miros.Thread{};
@@ -84,7 +84,7 @@ export fn OS_onIdle() void {
     asm volatile ("wfi");
 }
 
-var idle_stack: [0x100]u32 = undefined;
+var idle_stack: [0x100]u32 align(8) = undefined;
 
 pub fn main() noreturn {
     // init uart logging
